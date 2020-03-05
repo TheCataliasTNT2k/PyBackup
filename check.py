@@ -1,19 +1,18 @@
-#!/usr/bin/python3.6
+#!/usr/bin/python3.8
 
 import json
 import os
-from sys import exit
+from argparse import ArgumentParser
 from datetime import date, time, datetime, timedelta
+from sys import exit
+import hashlib
 
-BACKUP_CONFIG = "/home/admin/tools/.config.json"
-
-# The cronjob will start the backup at 3 o'clock (am). The average backup duration is 20 minutes.
-# Start the check at 3:20 am
-START_CHECK = (3, 20)
+from config_check import Config, create_from_json
 
 
-def get_backup_path(path):
-    if not path.endswith('/'):
+def get_backup_path(config: Config):
+    path = config.backup_dir
+    if not path.endswith("/"):
         path += "/"
 
     # get the current date
@@ -21,7 +20,7 @@ def get_backup_path(path):
 
     # check if the script has been executed before the backup job has
     # been started / before it can be completed (defined as START_CHECK)
-    if datetime.now().time() < time(*START_CHECK):
+    if datetime.now().time() < time(hour=config.time_hour, minute=config.time_minute):
         # check the backup of yesterday
         current_date -= timedelta(1)
 
@@ -29,39 +28,65 @@ def get_backup_path(path):
     return path
 
 
-def main():
-    config = json.loads(open(BACKUP_CONFIG, 'r').read())
+def main(config_path: str):
+    config: Config = create_from_json(json.load(open(config_path, "r")))
+    config.verify_settings()
 
-    backup_location = get_backup_path(config.get("backup_dir"))
+    backup_location = get_backup_path(config)
 
     if os.path.isdir(backup_location):
         files = [file for file in os.listdir(backup_location) if os.path.isfile(os.path.join(backup_location, file))]
 
-        for database in config.get("database").get("list"):
-            if f'{database}.sql' not in files:
-                print(f"Missing backup of {database}")
+        for database in config.database_list:
+            if f"{database}.sql" not in files:
+                print(f"Missing backup of database \"{database}\"")
                 exit(1)
 
-        for path in config.get("files").get("paths"):
-            if path.endswith('/'):
+        for path in config.file_path_list:
+            if path.endswith("/"):
                 path = path[:-1]
             path = os.path.basename(path)
-            if f'{os.path.basename(path)}.tar.gz' not in files:
-                print(f"Missing backup of {path}")
+            if f"{os.path.basename(path)}.tar.gz" not in files:
+                print(f"Missing backup of file or folder \"{path}\"")
                 exit(1)
 
-        if config.get("files").get("paths"):
-            for sum in config.get("files").get("checksums"):
-                if f'{sum}sum.txt' not in files:
-                    print(f"Warning: Missing {sum} check sums for the file backup!")
+        # check check sums
+        methods: list = ["sha512", "sha384", "sha256", "sha224", "sha1", "md5"]
+
+        for method in methods:
+            if f"{method}sum.txt" not in files:
+                print(f"Warning: Missing checksum file \"{method}sum.txt\"!")
+                continue
+            with open(f"{backup_location}/{method}sum.txt", "r") as check_sum_file:
+                for entry in check_sum_file.readlines():
+                    checksum, filename = entry.replace("\n", "").split("\t")
+                    if not os.path.isfile(f"{backup_location}/{filename}"):
+                        print(f"Warning: There is a checksum for \"{os.path.basename(filename)}\""
+                              f" in \"{method}sum.txt\", but the file does not exist")
+                        continue
+                    if checksum != getattr(hashlib, method)(
+                            open(f"{backup_location}/{filename}", "rb").read()).hexdigest():
+                        print(f"{method} checksum of \"{os.path.basename(filename)}\" is not correct!")
+                        exit(1)
+
+        if config.file_path_list:
+            for sum in config.checksums:
+                if f"{sum}sum.txt" not in files:
+                    print(f"Warning: Missing \"{sum}\" check sums for the file backup!")
                     exit(1)
 
-        print('Ok!')
+        print("Ok!")
         exit(0)
     else:
-        print('Backup not found!')
+        print("Backup not found!")
         exit(1)
 
 
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    parser = ArgumentParser()
+    parser.add_argument("-c", "--config", help="config file", nargs=1)
+
+    # get arguments
+    args = vars(parser.parse_args())
+
+    main(args.get("config")[0] if args.get("config") else ".config.json")
